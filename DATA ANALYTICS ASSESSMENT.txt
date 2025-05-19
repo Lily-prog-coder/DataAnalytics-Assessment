@@ -1,0 +1,245 @@
+USING MYSQL
+
+QUESTION 1
+Write a query to find customers with at least one funded savings plan AND one funded investment plan, sorted by total deposits.
+
+SELECT
+    u.id AS owner_id,
+    CONCAT(u.first_name, ' ', u.last_name) AS name,
+    s.savings_count,
+    i.investment_count,
+    ROUND(s.total_deposit / 100, 2) AS total_deposits
+FROM users_customuser u
+JOIN (
+    SELECT owner_id, COUNT(*) AS savings_count, SUM(confirmed_amount) AS total_deposit
+    FROM savings_savingsaccount
+    WHERE confirmed_amount > 0
+    GROUP BY owner_id
+) s ON u.id = s.owner_id
+JOIN (
+    SELECT owner_id, COUNT(*) AS investment_count
+    FROM plans_plan
+    WHERE is_a_fund = 1
+    GROUP BY owner_id
+) i ON u.id = i.owner_id
+ORDER BY total_deposits DESC;
+
+
+Identified users who have at least one funded savings account
+And at least one funded investment plan (is_a_fund = 1)
+Included total deposits (converted from kobo to naira) Ordered by total_deposits in descending order
+Returned only the top 3 results as requested for testing
+Used a clean, efficient structure (pre-filtered joins to avoid server overload)
+
+Approach (Q1):
+I used two subqueries to filter users who had at least one funded savings account and one funded investment plan. 
+This minimized the rows processed during the final join. 
+I then joined the filtered sets with the user table and calculated total deposits in naira. 
+The final result is sorted by total deposit in descending order.
+
+
+Question 2: Transaction Frequency Analysis
+Calculate the average number of transactions per customer per month and categorize customers as
+ “High Frequency,” “Medium Frequency,” or “Low Frequency” users.
+
+QUERY:
+WITH transactions AS (
+    SELECT
+        w.owner_id,
+        w.transaction_date
+    FROM withdrawals_withdrawal w
+    WHERE w.transaction_date IS NOT NULL
+),
+transaction_summary AS (
+    SELECT
+        owner_id,
+        COUNT(*) AS total_transactions,
+        TIMESTAMPDIFF(MONTH, MIN(transaction_date), MAX(transaction_date)) + 1 AS tenure_months
+    FROM transactions
+    GROUP BY owner_id
+),
+monthly_avg AS (
+    SELECT
+        ts.owner_id,
+        u.first_name,
+        u.last_name,
+        ts.total_transactions,
+        ts.tenure_months,
+        ROUND(ts.total_transactions / ts.tenure_months, 2) AS avg_tx_per_month
+    FROM transaction_summary ts
+    JOIN users_customuser u ON u.id = ts.owner_id
+),
+categorized AS (
+    SELECT
+        CASE
+            WHEN avg_tx_per_month >= 10 THEN 'High Frequency'
+            WHEN avg_tx_per_month BETWEEN 3 AND 9 THEN 'Medium Frequency'
+            ELSE 'Low Frequency'
+        END AS frequency_category,
+        COUNT(*) AS customer_count,
+        ROUND(AVG(avg_tx_per_month), 2) AS avg_transactions_per_month
+    FROM monthly_avg
+    GROUP BY frequency_category
+)
+SELECT * FROM categorized;
+
+
+Approach:
+I Used the withdrawals_withdrawal table since it contains transaction dates (transaction_date).
+I Aggregated total transactions per customer and calculated their tenure in months
+ based on their earliest and latest transaction dates.
+I Computed the average transactions per month per customer (total_transactions / tenure_months).
+I Categorized customers based on average monthly transactions:Which is
+
+High Frequency (≥10 transactions/month)
+Medium Frequency (3–9 transactions/month)
+Low Frequency (≤2 transactions/month)
+and Returned the number of customers per category along with the average transactions per month for each category.
+
+Challenges:
+The savings_savingsaccount table did not have transaction date timestamps, so deposits could not be included in this analysis.
+Focused solely on withdrawal transactions to calculate transaction frequency.
+
+Query Summary:
+Used Common Table Expressions (CTEs) to organize the logic clearly:
+
+I Extract transactions with dates
+I Calculated total transactions and tenure per customer
+I Computed average transactions per month
+I Grouped and categorize customers by frequency
+
+
+Question 3 
+Find all active accounts (savings or investment plans) with no transactions in the last 1 year (365 days).
+QUERY:
+
+WITH last_withdrawal AS (
+    SELECT
+        w.owner_id,
+        MAX(w.transaction_date) AS last_withdrawal_date
+    FROM withdrawals_withdrawal w
+    GROUP BY w.owner_id
+),
+last_savings_transaction AS (
+    -- Assuming no deposit transaction date; use maturity_end_date as last deposit date
+    SELECT
+        s.owner_id,
+        MAX(s.maturity_end_date) AS last_savings_date
+    FROM savings_savingsaccount s
+    GROUP BY s.owner_id
+),
+last_transaction AS (
+    SELECT
+        p.id AS plan_id,
+        p.owner_id,
+        CASE
+            WHEN p.is_regular_savings = 1 THEN 'Savings'
+            WHEN p.is_a_fund = 1 THEN 'Investment'
+            ELSE 'Other'
+        END AS type,
+        GREATEST(
+            COALESCE(ls.last_savings_date, '1900-01-01'),
+            COALESCE(lw.last_withdrawal_date, '1900-01-01')
+        ) AS last_transaction_date
+    FROM plans_plan p
+    LEFT JOIN last_savings_transaction ls ON ls.owner_id = p.owner_id
+    LEFT JOIN last_withdrawal lw ON lw.owner_id = p.owner_id
+),
+inactive_accounts AS (
+    SELECT
+        plan_id,
+        owner_id,
+        type,
+        last_transaction_date,
+        DATEDIFF(CURRENT_DATE, last_transaction_date) AS inactivity_days
+    FROM last_transaction
+    WHERE DATEDIFF(CURRENT_DATE, last_transaction_date) > 365
+)
+SELECT * FROM inactive_accounts
+ORDER BY inactivity_days DESC;
+
+
+Approach:
+
+I Extracted the last transaction date for each customer from withdrawals (transaction_date) 
+and savings accounts (maturity_end_date as proxy).
+I Compared the latest transaction date across both sources.
+I Filtered accounts where the last transaction date is over one year ago.
+I Labeled accounts as "Savings" or "Investment" based on plan flags.
+
+Challenges:
+Lack of explicit transaction dates for deposits meant using maturity_end_date as a proxy for last deposit date.
+Combining data from multiple tables to get the accurate last transaction date.
+
+Query Summary:
+Used Common Table Expressions (CTEs) to find the latest transactions and filtered for inactivity > 365 days.
+
+
+Question 4: Customer Lifetime Value (CLV) Estimation
+QUERY:
+WITH deposits AS (
+    SELECT
+        s.owner_id,
+        COUNT(*) AS deposit_count,
+        SUM(s.confirmed_amount) AS total_deposit_value
+    FROM savings_savingsaccount s
+    GROUP BY s.owner_id
+),
+withdrawals AS (
+    SELECT
+        w.owner_id,
+        COUNT(*) AS withdrawal_count,
+        SUM(w.amount_withdrawn) AS total_withdrawn_value
+    FROM withdrawals_withdrawal w
+    GROUP BY w.owner_id
+),
+transaction_summary AS (
+    SELECT
+        u.id AS customer_id,
+        CONCAT(u.first_name, ' ', u.last_name) AS name,
+        TIMESTAMPDIFF(MONTH, u.date_joined, CURDATE()) AS tenure_months,
+        COALESCE(d.deposit_count, 0) + COALESCE(w.withdrawal_count, 0) AS total_transactions,
+        COALESCE(d.total_deposit_value, 0) + COALESCE(w.total_withdrawn_value, 0) AS total_transaction_value
+    FROM users_customuser u
+    LEFT JOIN deposits d ON u.id = d.owner_id
+    LEFT JOIN withdrawals w ON u.id = w.owner_id
+),
+clv_calc AS (
+    SELECT
+        customer_id,
+        name,
+        tenure_months,
+        total_transactions,
+        ROUND(
+            (CASE 
+                WHEN tenure_months > 0 AND total_transactions > 0 
+                THEN (total_transactions / tenure_months) * 12 * (0.001 * (total_transaction_value / total_transactions)) 
+                ELSE 0 
+            END) / 100, 2) AS estimated_clv  
+    FROM transaction_summary
+)
+SELECT *
+FROM clv_calc
+ORDER BY estimated_clv DESC;
+
+
+Approach:
+I calculated the CLV using a simplified model based on transaction frequency and average profit per transaction:
+
+Tenure was calculated in months using the date_joined column.
+Total transactions was the sum of deposits and withdrawals per user.
+Average profit per transaction was assumed to be 0.1% of the transaction value.
+The CLV formula used was:
+
+CLV=(total transactions tenure in months) × 12 ×
+average profit per transaction CLV=( tenure in months total transactions) × 12 ×average profit per transaction
+I used Common Table Expressions (CTEs) to structure the query in clear, modular steps.
+
+Challenges:
+Initially, there was a missing column error due to referencing a nonexistent signup_date.
+ I resolved this by inspecting the schema and identifying date_joined as the correct field for calculating account tenure.
+
+
+
+
+
